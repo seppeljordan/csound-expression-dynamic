@@ -1,8 +1,12 @@
 -- | Main types
 {-# Language
-        DeriveFunctor, DeriveFoldable, DeriveTraversable,
-        DeriveGeneric,
-        TypeSynonymInstances, FlexibleInstances #-}
+  DeriveFunctor
+, DeriveFoldable
+, DeriveTraversable
+, DeriveGeneric
+, TypeSynonymInstances
+, FlexibleInstances
+#-}
 module Csound.Dynamic.Types.Exp(
     E, RatedExp(..), isEmptyExp, RatedVar, ratedVar, ratedVarRate, ratedVarId,
     ratedExp, noRate, withRate, setRate,
@@ -18,18 +22,16 @@ module Csound.Dynamic.Types.Exp(
     IsArrInit, ArrSize, ArrIndex
 ) where
 
-import Control.Applicative
-
-import GHC.Generics (Generic)
-import Data.Traversable
-import Data.Foldable hiding (concat)
-
-import Data.Hashable
-
-import Data.Map(Map)
-import Data.Maybe(isNothing)
+import           Control.Applicative
+import           Data.Fix
+import           Data.Foldable hiding (concat)
+import           Data.Functor.Classes (Eq1(liftEq), Eq2(liftEq2))
+import           Data.Hashable
 import qualified Data.IntMap as IM
-import Data.Fix
+import           Data.Map (Map)
+import           Data.Maybe (isNothing)
+import           Data.Traversable
+import           GHC.Generics (Generic)
 
 import qualified Csound.Dynamic.Tfm.DeduceTypes as R(Var(..))
 
@@ -73,6 +75,12 @@ data RatedExp a = RatedExp
         -- ^ Main expression
     } deriving (Show, Eq, Ord, Functor, Foldable, Traversable, Generic)
 
+instance Eq1 RatedExp where
+  liftEq comp r1 r2 =
+    ratedExpRate r1 == ratedExpRate r2 &&
+    ratedExpDepends r1 == ratedExpDepends r2 &&
+    (liftEq (liftEq comp) (ratedExpExp r1) (ratedExpExp r2))
+
 -- | RatedVar is for pretty printing of the wiring ports.
 type RatedVar = R.Var Rate
 
@@ -106,6 +114,9 @@ setRate r a = Fix $ (\x -> x { ratedExpRate = Just r }) $ unFix a
 -- of the constants (primitive values).
 newtype PrimOr a = PrimOr { unPrimOr :: Either Prim a }
     deriving (Show, Eq, Ord, Functor, Generic)
+
+instance Eq1 PrimOr where
+  liftEq comp (PrimOr x) (PrimOr y) = liftEq comp x y
 
 -- | Constructs PrimOr values from the expressions. It does inlining in
 -- case of primitive values.
@@ -185,6 +196,64 @@ data MainExp a
     | ReadMacrosDouble String
     | ReadMacrosString String
     deriving (Show, Eq, Ord, Functor, Foldable, Traversable, Generic)
+
+expEq1 :: (a -> b -> Bool) -> MainExp a -> MainExp b -> Bool
+expEq1 _ EmptyExp EmptyExp = True
+expEq1 _ (InitMacrosInt s1 i1) (InitMacrosInt s2 i2) = s1 == s2 && i1 == i2
+expEq1 _ (ExpPrim p1) (ExpPrim p2) = p1 == p2
+expEq1 comp (Tfm i1 xs1) (Tfm i2 xs2) = i1 == i2 && liftEq comp xs1 xs2
+expEq1 comp (ConvertRate a1 b1 c1) (ConvertRate a2 b2 c2) =
+  a1 == a2 && b1 == b2 && comp c1 c2
+expEq1 comp (Select r1 i1 x1) (Select r2 i2 x2) =
+  r1 == r2 && i1 == i2 && comp x1 x2
+expEq1 comp (If i1 x1 y1) (If i2 x2 y2) =
+  liftEq comp i1 i2 && comp x1 x2 && comp y1 y2
+expEq1 comp (ExpBool b1) (ExpBool b2) =
+  liftEq comp b1 b2
+expEq1 comp (ExpNum n1) (ExpNum n2) =
+  liftEq comp n1 n2
+expEq1 comp (InitVar v1 x1) (InitVar v2 x2) =
+  v1 == v2 && comp x1 x2
+expEq1 _ (ReadVar x) (ReadVar y) = x == y
+expEq1 comp (WriteVar v1 x1) (WriteVar v2 x2) =
+  v1 == v2 && comp x1 x2
+expEq1 comp (InitArr v1 size1) (InitArr v2 size2) =
+  v1 == v2 && liftEq comp size1 size2
+expEq1 comp (ReadArr v1 index1) (ReadArr v2 index2) =
+  v1 == v2 && liftEq comp index1 index2
+expEq1 comp (WriteArr v1 index1 x1) (WriteArr v2 index2 x2) =
+  v1 == v2 && comp x1 x2 && liftEq comp index1 index2
+expEq1 comp (WriteInitArr v1 index1 x1) (WriteInitArr v2 index2 x2) =
+  v1 == v2 && comp x1 x2 && liftEq comp index1 index2
+expEq1 comp (TfmArr i1 v1 info1 xs1) (TfmArr i2 v2 info2 xs2) =
+  i1 == i2 && v1 == v2 && info1 == info2 && liftEq comp xs1 xs2
+expEq1 comp (IfBegin r1 cond1) (IfBegin r2 cond2) =
+  r1 == r2 && liftEq comp cond1 cond2
+expEq1 _ ElseBegin ElseBegin = True
+expEq1 _ IfEnd IfEnd = True
+expEq1 comp (UntilBegin c1) (UntilBegin c2) = liftEq comp c1 c2
+expEq1 _ UntilEnd UntilEnd = True
+expEq1 comp (WhileBegin c1) (WhileBegin c2) = liftEq comp c1 c2
+expEq1 _ (WhileRefBegin v1) (WhileRefBegin v2) = v1 == v2
+expEq1 _ WhileEnd WhileEnd = True
+expEq1 _ (Verbatim x) (Verbatim y) = x == y
+expEq1 _ Starts Starts = True
+expEq1 comp (Seq x1 y1) (Seq x2 y2) =
+  comp x1 x2 && comp y1 y2
+expEq1 comp (Ends x) (Ends y) = comp x y
+expEq1 _ (InitMacrosDouble s1 d1) (InitMacrosDouble s2 d2) =
+  d1 == d2 && s1 == s2
+expEq1 _ (InitMacrosString x1 y1) (InitMacrosString x2 y2) =
+  x1 == x2 && y1 == y2
+expEq1 _ (ReadMacrosInt s1) (ReadMacrosInt s2) = s1 == s2
+expEq1 _ (ReadMacrosDouble s1) (ReadMacrosDouble s2) = s1 == s2
+expEq1 _ (ReadMacrosString s1) (ReadMacrosString s2) = s1 == s2
+expEq1 _ _ _ = False
+
+
+instance Eq1 MainExp where
+  liftEq = expEq1
+
 
 type IsArrInit = Bool
 type ArrSize a = [a]
@@ -301,6 +370,16 @@ data Inline a b = Inline
     , inlineEnv :: IM.IntMap b
     } deriving (Show, Eq, Ord, Functor, Foldable, Traversable)
 
+instance Eq2 Inline where
+  liftEq2 expComp envComp x y =
+    liftEq expComp (inlineExp x) (inlineExp y) &&
+    liftEq (liftEq envComp)
+      (IM.toAscList (inlineEnv x))
+      (IM.toAscList (inlineEnv y))
+
+instance (Eq a) => Eq1 (Inline a) where
+  liftEq = liftEq2 (==)
+
 instance (Hashable a, Hashable b) => Hashable (Inline a b) where
     hashWithSalt s (Inline a m) = s `hashWithSalt` (hash a) `hashWithSalt` (hash $ IM.toList m)
 
@@ -310,9 +389,24 @@ data InlineExp a
     | InlineExp a [InlineExp a]
     deriving (Show, Eq, Ord, Generic)
 
+instance Eq1 InlineExp where
+  liftEq _ (InlinePrim a) (InlinePrim b) = a == b
+  liftEq comp (InlineExp x xs) (InlineExp y ys) =
+    comp x y && liftEq (liftEq comp) xs ys
+  liftEq _ _ _ = False
+
 -- Expression as a tree (to be inlined)
 data PreInline a b = PreInline a [b]
     deriving (Show, Eq, Ord, Functor, Foldable, Traversable, Generic)
+
+instance Eq2 PreInline where
+  liftEq2 compFirst compSecond
+      (PreInline first1 seconds1) (PreInline first2 seconds2) =
+    compFirst first1 first2 &&
+    liftEq compSecond seconds1 seconds2
+
+instance (Eq a) => Eq1 (PreInline a) where
+  liftEq = liftEq2 (==)
 
 -- booleans
 
@@ -392,6 +486,3 @@ instance Hashable InstrId
 --    separate p-param for strings (we need it to read strings from global table)
 --    Csound doesn't permits us to use more than four string params so we need to
 --    keep strings in the global table and use `strget` to read them
-
-
-
